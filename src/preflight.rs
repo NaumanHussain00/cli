@@ -208,6 +208,30 @@ struct TokenShape {
     body: fn(u8) -> bool,
 }
 
+fn has_azure_storage_key(text: &str) -> bool {
+    text.split(';').any(|field| {
+        let Some((name, value)) = field.split_once('=') else {
+            return false;
+        };
+        let name = name
+            .trim()
+            .trim_matches(|character| matches!(character, '"' | '\''));
+        let value = value
+            .trim()
+            .trim_matches(|character| matches!(character, '"' | '\''));
+        name.eq_ignore_ascii_case("AccountKey") && is_azure_storage_key(value)
+    })
+}
+
+fn is_azure_storage_key(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 88
+        && bytes[..86]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'+' | b'/'))
+        && &bytes[86..] == b"=="
+}
+
 /// Distinctive credential prefixes. When two rows match, the first names
 /// the kind.
 const TOKEN_SHAPES: &[TokenShape] = &[
@@ -233,6 +257,30 @@ const TOKEN_SHAPES: &[TokenShape] = &[
         kind: "a GitHub token",
         prefixes: &["ghs_"],
         minimum: 36,
+        body: token_byte,
+    },
+    TokenShape {
+        kind: "a GitLab token",
+        prefixes: &["glpat-"],
+        minimum: 20,
+        body: token_byte,
+    },
+    TokenShape {
+        kind: "an npm token",
+        prefixes: &["npm_"],
+        minimum: 36,
+        body: token_byte,
+    },
+    TokenShape {
+        kind: "a Hugging Face token",
+        prefixes: &["hf_"],
+        minimum: 34,
+        body: token_byte,
+    },
+    TokenShape {
+        kind: "a PyPI API token",
+        prefixes: &["pypi-AgEIcHlwaS5vcmc"],
+        minimum: 50,
         body: token_byte,
     },
     TokenShape {
@@ -283,6 +331,9 @@ fn secret_shape(text: &str) -> Option<&'static str> {
     {
         return Some("a private-key marker");
     }
+    if has_azure_storage_key(text) {
+        return Some("an Azure Storage account key");
+    }
     TOKEN_SHAPES
         .iter()
         .find(|shape| has_token(text, shape.prefixes, shape.minimum, shape.body))
@@ -312,6 +363,16 @@ mod tests {
             ),
             (&["ghs_"][..], 36, "Az09_.-", '!', "a GitHub token"),
             (&["github_pat_"][..], 82, "Az09_.-", '!', "a GitHub token"),
+            (&["glpat-"][..], 20, "Az09_.-", '!', "a GitLab token"),
+            (&["npm_"][..], 36, "Az09_.-", '!', "an npm token"),
+            (&["hf_"][..], 34, "Az09_.-", '!', "a Hugging Face token"),
+            (
+                &["pypi-AgEIcHlwaS5vcmc"][..],
+                50,
+                "Az09_.-",
+                '!',
+                "a PyPI API token",
+            ),
             (
                 &[
                     "xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-", "xoxe-", "xoxe.", "xapp-",
@@ -366,6 +427,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn azure_storage_keys_require_an_exact_valid_account_key_value() {
+        let key = "A".repeat(86);
+        assert_eq!(
+            secret_shape(&format!(
+                "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey={key}==;EndpointSuffix=core.windows.net"
+            )),
+            Some("an Azure Storage account key")
+        );
+        assert_eq!(
+            secret_shape(&format!("AccountKey={}==", "A".repeat(85))),
+            None
+        );
+        assert_eq!(
+            secret_shape(&format!("AccountKey={}!==", "A".repeat(85))),
+            None
+        );
+        assert_eq!(secret_shape("AccountKey=not-a-key"), None);
     }
 
     #[test]
